@@ -1,13 +1,13 @@
-# BW-QTraj 
-Simulation program that couples Bloch wave calculations with quantum
+# BlochQT 
+Simulation program that couples Bloch wave image simulations with quantum
 trajectory calculations to provide a hydrodynamic interpretation to images
-obtianed in transmission electron microscopy. The details of the simulation are
+obtained in transmission electron microscopy. The details of the simulation are
 provided in the following publication: 
 
 <p>Rudinsky, S & Gauvin, R.<br>
 A hydrodynamic approach to electron beam imaging using a Bloch wave representation
 Ultramicroscopy, 2020, 212, 112979<br>
-doi: [](https://doi.org/10.1016/j.ultramic.2020.112979)</p>
+doi: (https://doi.org/10.1016/j.ultramic.2020.112979)</p>
 
 # Build
 Project requires Boost, Eigen, and FFTW3
