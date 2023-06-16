@@ -1,0 +1,393 @@
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <fstream>
+#include <math.h>
+#include <stdlib.h>
+#include <complex>
+#include <vector>
+#include <ctime>
+#include <cstdio>
+#include <array>	
+#include <algorithm>
+#include <Eigen/Dense>
+#include <Eigen/Core>
+#include <Eigen/Eigenvalues>
+#include <bits/stdc++.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include "../lib/WaveFn.h"
+#include "../lib/Crystal.h"
+#include "../lib/Beam.h"
+#include "../lib/Trajectory.h"
+#include "../lib/AuxFns.h"
+#include "../lib/Constants.h"
+
+using namespace std;
+using namespace Eigen;
+typedef complex<double> dcomp;
+
+/* All calculations done in Angstrom! */
+
+int main(){
+ 	system("exec rm Results/*.txt");
+
+/*Create output directories*/
+	if(mkdir("Results", 0777) == -1)
+		cerr << "Error : "<< strerror(errno) << "\n";
+	else
+		cout << "Results directory created\n";
+
+	if(mkdir("Input",0777) == -1)
+		cerr << "Error : "<<strerror(errno)<<"\n";
+	else
+		cout<<"Input directory created\n";
+
+	
+/*Input parameters for beam*/
+	Beam beam;
+	double E0_in;
+	cout<<"Energy (eV): \n";
+	cin>>E0_in;
+	beam.set_E0(E0_in); //in eV
+	beam.set_microscope_settings(10,0,1.1e8); //convergence angle in mrad and dF and Cs in Angstrom
+	double dprobe = beam.get_aconv()/beam.get_lambda();
+	dprobe = 1.0/dprobe;
+	
+	/*****************************/
+	/*The Crystal!*/
+	Crystal cryst;
+	
+/*Input parameters for material*/
+	string mat_in;
+	cout << "File name including location w.r.t. executable\n";
+	cin >> mat_in;
+	ifstream cinput(mat_in);
+	cryst.get_data(cinput);
+	int uc_x,uc_y,uc_z;
+	cout<<"Enter size of supercell in number of unit cells (nx,ny,nz):\n";
+	cin>>uc_x>>uc_y>>uc_z;
+	cryst.get_ncells(uc_x,uc_y,uc_z);
+
+/*Build crystal*/	
+	if(!cryst.ctype.compare("FCC"))
+		cryst.FCC();
+	else if(!cryst.ctype.compare("DC"))
+	 	cryst.DC();
+	else if(!cryst.ctype.compare("BCC")){
+		cout<<"Haven't built BCC yet\n";
+		exit(0);
+	}
+	else{
+		cout<<"Something wrong with crystal input\n";
+		exit(0);
+	}
+	cryst.atomwrite();
+	cryst.build_Vimag(beam.get_E0());
+
+	double aax = cryst.get_aax();
+	double aay = cryst.get_aay();
+	double aaz = cryst.get_aaz();
+	double aa = cryst.get_aa();
+
+/*Compute incident wave vector*/
+	Vector3d kt;
+	char tilt;
+
+	cout<<"Tilt (y/n)?\n";
+	cin>>tilt;
+
+	if(tilt == 'n')
+		kt << 0,0,0;
+	else if(tilt == 'y'){
+		char BorA;
+		cout<<"Bragg (B) or choose angle (A)?\n";
+		cin>>BorA;
+		if(BorA == 'B'){
+			Vector3d bSpot;
+			cout<<"Enter Bragg reflection:\n";
+			cin>>bSpot(0)>>bSpot(1)>>bSpot(2);
+			kt = -(0.5)*(bSpot(0)*cryst.b.col(0) + bSpot(1)*cryst.b.col(1) + bSpot(2)*cryst.b.col(2));
+		}
+		else if(BorA == 'A'){
+			double tiltangle;
+			cout<<"Enter tilt angle (single direction in x):\n";
+			cin>>tiltangle;
+			double ktx_B = (1/beam.get_lambda())*sin(tiltangle);
+			kt << ktx_B,0,0;
+		}
+		else{
+			cout<<"Invalid input (B or A)\n";
+			exit(0);
+		}
+	}
+	else{
+		cout<<"Invalid input (y or n)\n";
+		exit(0);
+	}
+	cout<<"kt = "<<kt.norm()<<"\n";
+	beam.calc_kin(kt);
+	double k0 = beam.k_in.norm();
+
+/*The grid and real space representation*/
+	vector<double> xg,yg;
+	int npointsx,npointsy;
+	cout<<"Number of real space grid points in x and y?\n";
+	cin>> npointsx >> npointsy;
+	int npoints[2] = {npointsx,npointsy};
+	double grid_limit[2] = {aax,aay};
+	double dx = grid_limit[0]/npointsx;
+	double dy = grid_limit[1]/npointsy;
+	double gmax = AuxFns::RSgrid(grid_limit,npoints,xg,yg);
+
+/*Absorption?*/
+	char ans;
+	bool absorb = false;
+	cout<<"Include absorption (y/n)?\n";
+	cin>>ans;
+
+	if(ans=='n')
+		absorb = false;
+	else if(ans=='y')
+		absorb = true;
+	else{
+		cout<<"Not an option!\n";
+		exit(0);
+	}
+
+/*Compute g and subset q vectors to be used*/
+	gmax = 5;
+	double c1_in, c2_in;
+	cout<<"Input limit c1 (strong beam) and c2 (weak beam) in 1/V/Angstrom^2 \n";
+	cin>>c1_in>>c2_in;
+	double Climit[2] = {c1_in,c2_in};
+	cout<<"gmax: "<<gmax<<" Climit: ["<<Climit[0]<<","<<Climit[1]<<"]"<<"\n";
+	MatrixXd g,gpert;
+	Vector3d g1,g2;
+	vector<double> sg;
+
+	AuxFns::gZA(beam,cryst,gmax,Climit,absorb,g,gpert,sg);
+	const int g_size = g.rows();
+	cout<<"Number of g-vectors in diagonalization: "<<g_size<<"\n";
+	ofstream g_out("Input/gvectors.txt");
+	g_out<<g;
+	g_out.close();
+
+	cout<<"Number of g-vectors in perturbation: "<<gpert.rows()<<"\n";
+	ofstream gpert_out("Input/gpertvectors.txt");
+	gpert_out<<gpert;
+	gpert_out.close();
+
+/*set to make up finer grid*/
+	MatrixXd q;
+
+	int fine_x, fine_y;
+	cout<<"Fine grid size? Nx x Ny\n";
+	cin>>fine_x>>fine_y;
+	q.resize(fine_x*fine_y,3);
+	int cnt1 = 0;
+	for(int i=0;i<fine_x;i++){
+		for(int j=0;j<fine_y;j++){
+			q.row(cnt1) = ((double)i/(double)fine_x)*cryst.b.col(0) + ((double)j/(double)fine_y)*cryst.b.col(1) + 0*cryst.b.col(2);
+			cnt1++;
+		}
+	}
+/*For each lattice vector q, the Bloch calculation must be performed*/
+	MatrixXd gfine;
+	gfine.resize(g.rows(),3);
+	Eigen::ArrayXXcd psifsum = Eigen::ArrayXXcd::Zero(yg.size(),xg.size());
+
+/*Initial boundary conditions of wave function*/
+	VectorXcd psi0 = VectorXcd::Zero(g_size);
+	Vector3d Rp;
+	double Rxp, Ryp;
+//	cout<<"Probe position in x y?\n";
+//	cin>>Rxp>>Ryp;
+	Rxp = aax/2; Ryp = aay/2;
+	Rp << aax/2, aay/2, 0;
+	WaveFn wf(xg,yg);
+
+/*Determine max thickness*/	
+		double zf;
+		cout<<"Enter max thickness (in Angstrom): \n";
+		cin>>zf;
+
+
+/*Loop over fine grid points starts here*/
+/****************************************/	
+	for(int subl=0; subl<q.rows(); subl++){
+		MatrixXcd X;
+		for(int i=0;i<g_size;i++)
+			gfine.row(i) = g.row(i) + q.row(subl);	
+	
+		cryst.buildXmatrix(gfine,absorb,X);
+	
+		/*Compute diagonal of matrix*/
+		Vector3d gX;
+		for(int i=0;i<g_size;i++){
+			gX = gfine.row(i);
+			if(absorb == true)
+				X(i,i) = -(kt+gX).dot(kt+gX) + ri*(2*mass*abs(charge)*cryst.V_imag/(h*h)*1e-20); 
+			else
+				X(i,i) = -(kt+gX).dot(kt+gX);
+		}
+	
+		/*Add Bethe potentials*/
+		cryst.addPerturbation(gfine,gpert,beam.k_in,absorb,X);
+	
+		ofstream x_o("Input/Xmatrix.txt");
+		x_o << X;
+		x_o.close();
+	
+/*Compute eigenvalues and eigenvectors of Bloch matrix*/
+		VectorXcd gamma;
+		MatrixXcd Coeff;
+		Vector3d un;
+		un << 0,0,1;
+	
+		clock_t start_time = clock();
+		if(absorb == true){
+			ComplexEigenSolver<MatrixXcd> es(X);
+			gamma = es.eigenvalues()/beam.k_in.dot(un);
+			Coeff = es.eigenvectors();
+			ofstream g_o("Input/Gamma.txt");
+			g_o<<gamma<<"\n";
+			g_o.close();
+		}
+		else{ 
+			SelfAdjointEigenSolver<MatrixXcd> es(X);
+			gamma = es.eigenvalues()/beam.k_in.dot(un);
+			Coeff = es.eigenvectors();
+			ofstream g_o("Input/Gamma.txt");
+			g_o<<gamma<<"\n";
+			g_o.close();
+		}
+		clock_t end_time = clock();
+		clock_t nbrticks = end_time-start_time;
+		double nbrseconds = nbrticks/(double) CLOCKS_PER_SEC;
+		cout<<"Time to compute eigenvalues (in s): "<<nbrseconds<<"\n";
+
+		beam.build_probe(Rp,gfine,psi0);
+
+/*Compute psig for each Block*/	
+		wf.set_thickness(zf);
+		wf.build_psig(gamma, Coeff, psi0);
+		wf.build_EW(beam, gfine, xg, yg);
+		psifsum = psifsum + wf.psif;
+	}
+	AuxFns::write_psif("0",psifsum);
+
+/*Compute trajectories in time*/
+/**************************************/
+	char traj_choice;
+	cout<<"Compute trajectories?\n";
+	cin>>traj_choice;
+	
+	if(traj_choice == 'y'){
+		ArrayXXcd psig_all(g.rows(),q.rows());
+/*Initiate trajectories*/	
+		int ntrajx,ntrajy;
+		cout<<"Number of trajectories in x and y?\n";
+		cin>>ntrajx>>ntrajy;
+		int ntraj_total = ntrajx*ntrajy;
+		vector<Trajectory> traj(ntraj_total);
+		vector<ofstream> traj_out;
+		cout<<traj.size()<<"\n";
+	
+		int cnt2 = 0;
+		for(int i=0;i<ntrajx;i++){
+			for(int j=0;j<ntrajy;j++){
+				traj[cnt2].init_position(Rxp - dprobe + dprobe*i/(double)ntrajx, Ryp - dprobe + dprobe*j/(double)ntrajy);
+				ostringstream ss;
+				ss<<cnt2;
+				string zstr = ss.str();
+				ofstream out;
+				out.open("Results/Traj"+zstr+".txt");
+				traj_out.push_back(move(out));
+				AuxFns::write_traj(traj_out[cnt2],traj[cnt2]);
+				cnt2++;
+			}
+		}
+		double dt = 1e-10; //Time invariant system, dt is just an increment in space, unless using force equation
+	
+		double avg_z = 0;
+		while(avg_z<zf){
+			if(abs(avg_z/zf-0.25) < 0.00001)
+				cout<<"25% done\n";
+			if(abs(avg_z/zf-0.5) < 0.00001)
+				cout<<"50% done\n";
+			if(abs(avg_z/zf-0.75) < 0.00001)
+				cout<<"75% done\n";
+	
+			avg_z = 0;
+			for(int j=0;j<ntraj_total;j++){
+				wf.set_thickness(traj[j].zcoord);
+
+				for(int subl=0; subl<q.rows(); subl++){
+					MatrixXcd X;
+					for(int i=0;i<g_size;i++)
+						gfine.row(i) = g.row(i) + q.row(subl);	
+				
+					cryst.buildXmatrix(gfine,absorb,X);
+				
+			/*Compute diagonal of matrix*/
+					Vector3d gX;
+					for(int i=0;i<g_size;i++){
+						gX = gfine.row(i);
+						if(absorb == true)
+							X(i,i) = -(kt+gX).dot(kt+gX) + ri*(2*mass*abs(charge)*cryst.V_imag/(h*h)*1e-20); 
+						else
+							X(i,i) = -(kt+gX).dot(kt+gX);
+					}
+				
+					/*Add Bethe potentials*/
+					cryst.addPerturbation(gfine,gpert,beam.k_in,absorb,X);
+				
+					ofstream x_o("Input/Xmatrix.txt");
+					x_o << X;
+					x_o.close();
+				
+			/*Compute eigenvalues and eigenvectors of Bloch matrix*/
+					VectorXcd gamma;
+					MatrixXcd Coeff;
+					Vector3d un;
+					un << 0,0,1;
+				
+					clock_t start_time = clock();
+					if(absorb == true){
+						ComplexEigenSolver<MatrixXcd> es(X);
+						gamma = es.eigenvalues()/beam.k_in.dot(un);
+						Coeff = es.eigenvectors();
+					}
+					else{ 
+						SelfAdjointEigenSolver<MatrixXcd> es(X);
+						gamma = es.eigenvalues()/beam.k_in.dot(un);
+						Coeff = es.eigenvectors();
+					}
+					clock_t end_time = clock();
+					clock_t nbrticks = end_time-start_time;
+					double nbrseconds = nbrticks/(double) CLOCKS_PER_SEC;
+					beam.build_probe(Rp,gfine,psi0);
+			
+			/*Compute psig for each Block*/	
+					wf.set_thickness(traj[j].zcoord);
+					wf.build_psig(gamma, Coeff, psi0);
+				
+					psig_all.col(subl) = wf.psig;
+				}
+
+				traj[j].RK2(psig_all, beam.k_in, g, q, dt);
+				AuxFns::write_traj(traj_out[j],traj[j]);
+				avg_z += traj[j].zcoord;
+			}
+			avg_z /= ntraj_total;
+		}
+
+		for(int j=0;j<ntraj_total;j++)
+			traj_out[j].close();
+	}
+
+	return 0;
+}
+
+
